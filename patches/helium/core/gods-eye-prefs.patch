@@ -1,8 +1,8 @@
 --- a/components/helium_services/pref_names.h
 +++ b/components/helium_services/pref_names.h
 @@ -1,6 +1,20 @@
- inline constexpr char kHeliumServicesConsented[] =
-     "helium.services.user_consented";
+ inline constexpr char kHeliumServicesOrigin[] =
+     "helium.services.origin_override";
  
 +// God's Eye feature prefs
 +inline constexpr char kGodsEyeBlockedDomains[] =
@@ -23,8 +23,8 @@
  #endif  // COMPONENTS_HELIUM_SERVICES_PREF_NAMES_H_
 --- a/chrome/browser/ui/browser_ui_prefs.cc
 +++ b/chrome/browser/ui/browser_ui_prefs.cc
-@@ -2,4 +2,9 @@
-     registry->RegisterBooleanPref(prefs::kHeliumServicesConsented, false);
+@@ -1,5 +1,10 @@
+     registry->RegisterStringPref(prefs::kHeliumServicesOrigin, "");
    }
  
 +  registry->RegisterListPref(prefs::kGodsEyeBlockedDomains);
@@ -33,3 +33,4 @@
 +  registry->RegisterBooleanPref(prefs::kGodsEyeActive, false);
 +
    registry->RegisterBooleanPref(
+       prefs::kHttpsOnlyModeEnabled, false,

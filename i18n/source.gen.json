@@ -684,6 +684,18 @@
     "message": "System Settings &gt; Keyboard &gt; Keyboard Shortcuts &gt; App Shortcuts"
   },
   {
+    "name": "IDS_SETTINGS_GODS_EYE",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Name of the God's Eye focus and blocking feature",
+    "message": "God's Eye"
+  },
+  {
+    "name": "IDS_SETTINGS_GODS_EYE_DESCRIPTION",
+    "source": "chrome/app/settings_strings.grdp",
+    "context": "Description of the God's Eye feature in the settings menu",
+    "message": "Block distracting websites and keywords"
+  },
+  {
     "name": "IDS_POLICY_SOURCE_HOP",
     "source": "components/policy_strings.grdp",
     "context": "Indicates that the policy originates from Helium defaults.",
