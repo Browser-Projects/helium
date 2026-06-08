@@ -1,12 +1,13 @@
 --- a/chrome/browser/gods_eye/BUILD.gn
 +++ b/chrome/browser/gods_eye/BUILD.gn
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,23 @@
 +# Copyright 2025 The Helium Authors
 +# You can use, redistribute, and/or modify this source code under
 +# the terms of the GPL-3.0 license that can be found in the LICENSE file.
 +
 +source_set("gods_eye") {
 +  sources = [
++    "gods_eye_allowlist.h",
 +    "gods_eye_dom_observer.cc",
 +    "gods_eye_dom_observer.h",
 +    "gods_eye_navigation_throttle.cc",
@@ -33,6 +34,65 @@
      "//chrome/browser/gpu",
      "//chrome/browser/gpu:impl",
      "//chrome/browser/hang_monitor",
+--- a/chrome/browser/gods_eye/gods_eye_allowlist.h
++++ b/chrome/browser/gods_eye/gods_eye_allowlist.h
+@@ -0,0 +1,56 @@
++// Copyright 2025 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_GODS_EYE_GODS_EYE_ALLOWLIST_H_
++#define CHROME_BROWSER_GODS_EYE_GODS_EYE_ALLOWLIST_H_
++
++#include <string_view>
++
++#include "base/strings/string_util.h"
++#include "url/gurl.h"
++
++// Hard-coded allowlist of domains that always bypass Gods Eye blocking.
++// These cannot be modified by the user. Covers Google Workspace productivity
++// tools but deliberately excludes google.com (search).
++inline constexpr const char* kGodsEyeAllowedHosts[] = {
++    "accounts.google.com",    // Auth — required for all Google sign-ins
++    "calendar.google.com",
++    "chat.google.com",
++    "classroom.google.com",
++    "contacts.google.com",
++    "docs.google.com",
++    "drive.google.com",
++    "forms.google.com",
++    "groups.google.com",
++    "jamboard.google.com",
++    "keep.google.com",
++    "mail.google.com",
++    "meet.google.com",
++    "sheets.google.com",
++    "sites.google.com",
++    "slides.google.com",
++    "voice.google.com",
++    "workspace.google.com",
++};
++
++// Returns true if |url| matches any entry in the hardcoded allowlist.
++// Comparison is case-insensitive; leading "www." is stripped before matching.
++// Whitelisted domains bypass ALL Gods Eye blocking (domain, keyword, and DOM).
++inline bool IsGodsEyeAllowedHost(const GURL& url) {
++  if (!url.has_host()) {
++    return false;
++  }
++  std::string host(url.host());
++  if (base::StartsWith(host, "www.", base::CompareCase::INSENSITIVE_ASCII)) {
++    host = host.substr(4);
++  }
++  for (const char* allowed : kGodsEyeAllowedHosts) {
++    if (base::EqualsCaseInsensitiveASCII(host, allowed)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_ALLOWLIST_H_
 --- a/chrome/browser/gods_eye/gods_eye_dom_observer.h
 +++ b/chrome/browser/gods_eye/gods_eye_dom_observer.h
 @@ -0,0 +1,54 @@
@@ -92,7 +152,7 @@
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_DOM_OBSERVER_H_
 --- a/chrome/browser/gods_eye/gods_eye_dom_observer.cc
 +++ b/chrome/browser/gods_eye/gods_eye_dom_observer.cc
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,209 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -107,39 +167,34 @@
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
 +#include "base/strings/utf_string_conversions.h"
++#include "base/task/sequenced_task_runner.h"
 +#include "base/time/time.h"
 +#include "base/values.h"
++#include "chrome/browser/gods_eye/gods_eye_allowlist.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/common/webui_url_constants.h"
 +#include "components/helium_services/gods_eye_pref_names.h"
 +#include "components/prefs/pref_service.h"
 +#include "content/public/browser/browser_context.h"
-+#include "content/public/browser/navigation_controller.h"
-+#include "chrome/common/chrome_isolated_world_ids.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/page_navigator.h"
 +#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/web_contents.h"
++#include "chrome/common/chrome_isolated_world_ids.h"
 +#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
 +#include "url/gurl.h"
 +
 +namespace {
 +
-+// Returns true if the URL is one we must not scan/redirect from (our own
-+// chrome:// pages, internal schemes, data:, etc.).
++// Returns true if the URL is one we must not scan/redirect from.
 +bool IsExcludedURL(const GURL& url) {
 +  if (!url.is_valid()) {
 +    return true;
 +  }
-+  // Only scan real web content. http(s) only.
++  // Only scan real web content.
 +  if (!url.SchemeIsHTTPOrHTTPS()) {
 +    return true;
-+  }
-+  // Defense-in-depth (these are already filtered out by the scheme check above
-+  // since chrome:// is not http(s), but kept explicit for clarity):
-+  if (url.SchemeIs("chrome") || url.SchemeIs("helium")) {
-+    if (url.host() == chrome::kHeliumGodsEyeHost ||
-+        url.host() == chrome::kHeliumRestrictedPageHost) {
-+      return true;
-+    }
 +  }
 +  return false;
 +}
@@ -177,8 +232,13 @@
 +    return;
 +  }
 +
-+  // Skip non-web pages and our own chrome:// pages.
++  // Skip non-web pages and internal pages.
 +  if (IsExcludedURL(validated_url)) {
++    return;
++  }
++
++  // Skip hardcoded allowlisted domains (Google Workspace, etc.).
++  if (IsGodsEyeAllowedHost(validated_url)) {
 +    return;
 +  }
 +
@@ -226,8 +286,7 @@
 +  }
 +
 +  // Inject a small JS snippet that scans body innerText + title + og:title for
-+  // any of the keywords. Returns the matched keyword string, or empty string
-+  // if none matched.
++  // any of the keywords. Returns the matched keyword string, or empty string.
 +  std::string script =
 +      "(function(){"
 +      "  try {"
@@ -272,22 +331,40 @@
 +  }
 +
 +  double expiry = prefs->GetDouble(prefs::kGodsEyeExpiryTimestamp);
-+  std::string redirect_url =
++  std::string redirect_url_str =
 +      std::string(chrome::kHeliumRestrictedPageURL) +
 +      "/?reason=dom-keyword&value=" +
 +      base::EscapeQueryParamValue(matched, false) +
 +      "&expiry=" +
 +      base::NumberToString(static_cast<int64_t>(expiry));
 +
-+  web_contents()->GetController().LoadURL(
-+      GURL(redirect_url), content::Referrer(),
-+      ui::PAGE_TRANSITION_AUTO_TOPLEVEL, std::string());
++  // Use PostTask + OpenURL to avoid any re-entrancy issues. The JS callback
++  // may fire while the web contents is in an arbitrary navigation state.
++  content::OpenURLParams params(
++      GURL(redirect_url_str),
++      content::Referrer(),
++      WindowOpenDisposition::CURRENT_TAB,
++      ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
++      /*is_renderer_initiated=*/false);
++
++  base::WeakPtr<content::WebContents> weak_wc =
++      web_contents()->GetWeakPtr();
++
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<content::WebContents> wc,
++             content::OpenURLParams p) {
++            if (wc)
++              wc->OpenURL(p, /*navigation_handle_callback=*/{});
++          },
++          std::move(weak_wc), std::move(params)));
 +}
 +
 +WEB_CONTENTS_USER_DATA_KEY_IMPL(GodsEyeDomObserver);
 --- a/chrome/browser/gods_eye/gods_eye_navigation_throttle.h
 +++ b/chrome/browser/gods_eye/gods_eye_navigation_throttle.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,54 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -298,6 +375,7 @@
 +#include <string>
 +
 +#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
 +#include "components/prefs/pref_service.h"
 +#include "content/public/browser/navigation_throttle.h"
 +
@@ -327,18 +405,23 @@
 + private:
 +  ThrottleCheckResult CheckNavigation();
 +  bool IsGodsEyeActive() const;
++  bool IsAllowedHost(const GURL& url) const;
 +  std::string MatchesDomain(const GURL& url) const;
 +  std::string MatchesKeyword(const GURL& url) const;
++
++  // Cancels the current navigation and schedules a redirect to the Gods Eye
++  // restricted page via PostTask (safe to call from within throttle callbacks).
 +  ThrottleCheckResult RedirectToRestrictedPage(const std::string& reason,
 +                                               const std::string& value);
 +
 +  raw_ptr<PrefService> pref_service_;
++  base::WeakPtrFactory<GodsEyeNavigationThrottle> weak_factory_{this};
 +};
 +
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_NAVIGATION_THROTTLE_H_
 --- a/chrome/browser/gods_eye/gods_eye_navigation_throttle.cc
 +++ b/chrome/browser/gods_eye/gods_eye_navigation_throttle.cc
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,203 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -350,15 +433,17 @@
 +#include "base/strings/escape.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
++#include "base/task/sequenced_task_runner.h"
 +#include "base/time/time.h"
++#include "chrome/browser/gods_eye/gods_eye_allowlist.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/common/webui_url_constants.h"
 +#include "components/helium_services/gods_eye_pref_names.h"
 +#include "components/prefs/pref_service.h"
 +#include "content/public/browser/browser_context.h"
-+#include "content/public/browser/navigation_controller.h"
 +#include "content/public/browser/navigation_handle.h"
 +#include "content/public/browser/navigation_throttle_registry.h"
++#include "content/public/browser/page_navigator.h"
 +#include "content/public/browser/web_contents.h"
 +#include "ui/base/page_transition_types.h"
 +#include "url/gurl.h"
@@ -431,6 +516,10 @@
 +  return true;
 +}
 +
++bool GodsEyeNavigationThrottle::IsAllowedHost(const GURL& url) const {
++  return IsGodsEyeAllowedHost(url);
++}
++
 +std::string GodsEyeNavigationThrottle::MatchesDomain(const GURL& url) const {
 +  if (!url.has_host())
 +    return std::string();
@@ -480,17 +569,39 @@
 +    const std::string& reason,
 +    const std::string& value) {
 +  double expiry = pref_service_->GetDouble(prefs::kGodsEyeExpiryTimestamp);
-+  std::string redirect_url =
++  std::string redirect_url_str =
 +      std::string(chrome::kHeliumRestrictedPageURL) + "/?reason=" +
 +      base::EscapeQueryParamValue(reason, false) + "&value=" +
 +      base::EscapeQueryParamValue(value, false) + "&expiry=" +
 +      base::NumberToString(static_cast<int64_t>(expiry));
 +
-+  navigation_handle()->GetWebContents()->GetController().LoadURL(
-+      GURL(redirect_url), content::Referrer(),
-+      ui::PAGE_TRANSITION_AUTO_TOPLEVEL, std::string());
++  // Build OpenURLParams from the current navigation handle, then override the
++  // URL. We must NOT call GetController().LoadURL() here because we are inside
++  // a NavigationThrottle callback — doing so fires a DCHECK in Chromium's
++  // navigation machinery. Instead, schedule the new navigation asynchronously
++  // so it executes after the throttle stack has fully unwound.
++  content::OpenURLParams params =
++      content::OpenURLParams::FromNavigationHandle(navigation_handle());
++  params.url = GURL(redirect_url_str);
++  params.transition = ui::PAGE_TRANSITION_AUTO_TOPLEVEL;
++  params.is_renderer_initiated = false;
 +
-+  return CANCEL;
++  base::WeakPtr<content::WebContents> weak_wc =
++      navigation_handle()->GetWebContents()->GetWeakPtr();
++
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<content::WebContents> wc,
++             content::OpenURLParams p) {
++            if (wc)
++              wc->OpenURL(p, /*navigation_handle_callback=*/{});
++          },
++          std::move(weak_wc), std::move(params)));
++
++  // CANCEL_AND_IGNORE: stop the original navigation and pretend it never
++  // happened; the PostTask above will navigate to the restricted page.
++  return CANCEL_AND_IGNORE;
 +}
 +
 +GodsEyeNavigationThrottle::ThrottleCheckResult
@@ -499,6 +610,10 @@
 +    return PROCEED;
 +
 +  const GURL& url = navigation_handle()->GetURL();
++
++  // Hard-coded allowlist: always allow these regardless of user settings.
++  if (IsAllowedHost(url))
++    return PROCEED;
 +
 +  std::string matched_domain = MatchesDomain(url);
 +  if (!matched_domain.empty())
