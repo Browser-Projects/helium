@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   cirrus:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
     - uses: actions/checkout@v4
     - uses: cirruslabs/cirrus-action@ac5191d18a9bff05ff1a38f280f2b6d768e32153

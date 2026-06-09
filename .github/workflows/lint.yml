@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -16,7 +16,7 @@ jobs:
     - run: python3 ./devutils/lint.py
 
   i18n:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
