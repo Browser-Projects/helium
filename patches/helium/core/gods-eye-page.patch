@@ -86,7 +86,7 @@
 +#endif  // CHROME_BROWSER_UI_WEBUI_GODS_EYE_GODS_EYE_UI_H_
 --- a/chrome/browser/ui/webui/gods_eye/gods_eye_ui.cc
 +++ b/chrome/browser/ui/webui/gods_eye/gods_eye_ui.cc
-@@ -0,0 +1,454 @@
+@@ -0,0 +1,609 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -105,7 +105,6 @@
 +#include "services/network/public/mojom/content_security_policy.mojom.h"
 +
 +namespace {
-+
 +constexpr char kIndexHtml[] = R"GODS_EYE_HTML(
 +<!DOCTYPE html>
 +<html lang="en">
@@ -218,6 +217,35 @@
 +      font-size: 11px; font-family: Menlo, Monaco, monospace; color: var(--text);
 +      max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-all;
 +    }
++    .allowlist-system-tag {
++      display: inline-flex; align-items: center; gap: 4px;
++      background: var(--bg); color: var(--text-muted);
++      border: 1px solid var(--border); border-radius: 20px;
++      padding: 3px 10px; font-size: 12px; opacity: 0.7;
++    }
++    .allowlist-final-tag {
++      display: inline-flex; align-items: center; gap: 6px;
++      background: #e8f5e9; color: #2e7d32;
++      border: 1px solid #a5d6a7; border-radius: 20px;
++      padding: 4px 12px 4px 14px; font-size: 13px; font-weight: 500;
++    }
++    @media (prefers-color-scheme: dark) {
++      .allowlist-final-tag { background: #1b3d1d; color: #81c784; border-color: #388e3c; }
++    }
++    .allowlist-pending-tag {
++      display: inline-flex; align-items: center; gap: 6px;
++      background: #fff8e1; color: #f57f17;
++      border: 1px solid #ffe082; border-radius: 20px;
++      padding: 4px 12px 4px 14px; font-size: 13px; font-weight: 500;
++    }
++    @media (prefers-color-scheme: dark) {
++      .allowlist-pending-tag { background: #3d2e00; color: #ffcc02; border-color: #f9a825; }
++    }
++    .allowlist-section-label {
++      font-size: 11px; text-transform: uppercase;
++      letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 8px; margin-top: 14px;
++    }
++    .allowlist-section-label:first-child { margin-top: 0; }
 +  </style>
 +</head>
 +<body>
@@ -262,6 +290,24 @@
 +      og:title, the page will be blocked.
 +    </div>
 +  </div>
++  <div class="card">
++    <div class="card-title">&#128737; Allowlist</div>
++    <div class="allowlist-section-label">System Protected (always allowed, cannot be removed)</div>
++    <div class="tag-list" id="system-allowlist-tags"></div>
++    <div class="allowlist-section-label">Your Active Allowlist</div>
++    <div class="tag-list" id="user-allowlist-tags"></div>
++    <div class="allowlist-section-label" id="pending-label" style="display:none">Under 72-Hour Review</div>
++    <div class="tag-list" id="pending-allowlist-tags"></div>
++    <div class="row" style="margin-top:14px">
++      <input type="text" id="allowlist-input" placeholder="e.g. reddit.com" />
++      <button class="btn-add" onclick="addAllowlistDomain()">Add to Allowlist</button>
++    </div>
++    <div class="time-note" style="margin-top:8px">
++      Added domains activate after a 72-hour review period. You can cancel anytime before activation.
++      Once active, you can remove a domain immediately. Re-adding a removed domain starts a new review.
++    </div>
++  </div>
++
 +  <div id="save-error"></div>
 +  <button class="btn-save" id="save-btn" onclick="saveData()">&#128274; Save &amp; Lock</button>
 +  <div id="debug-panel">
@@ -342,7 +388,7 @@
 +};
 +
 +var TIME_API = 'https://timeapi.io/api/time/current/zone?timeZone=UTC';
-+var state = { domains: [], keywords: [], expiryTimestamp: 0, active: false, nowUtc: 0 };
++var state = { domains: [], keywords: [], expiryTimestamp: 0, active: false, nowUtc: 0, userAllowedDomains: [], allowlistPending: [] };
 +
 +function fmt(ts) {
 +  return ts ? new Date(ts * 1000).toLocaleString() : '';
@@ -410,16 +456,19 @@
 +    document.getElementById('utc-time-display').textContent = 'Current UTC time: ' + fmt(state.nowUtc);
 +    dbgLog('init', 'utc=' + state.nowUtc + ' calling getGodsEyeData');
 +    var data = await cr.sendWithPromise('getGodsEyeData');
-+    dbgLog('init', 'got data: ' + JSON.stringify(data));
++    dbgLog('init', 'got data keys: ' + Object.keys(data).join(','));
 +    state.domains = data.domains || [];
 +    state.keywords = data.keywords || [];
 +    state.expiryTimestamp = data.expiryTimestamp || 0;
 +    state.active = data.active || false;
++    state.userAllowedDomains = data.userAllowedDomains || [];
++    state.allowlistPending = data.allowlistPending || [];
 +    if (state.active && state.expiryTimestamp > 0 && state.nowUtc >= state.expiryTimestamp) {
 +      state.active = false; state.expiryTimestamp = 0;
 +    }
 +    renderTags('domains-list', state.domains, removeDomain);
 +    renderTags('keywords-list', state.keywords, removeKeyword);
++    renderAllowlist(state.userAllowedDomains, state.allowlistPending, state.nowUtc);
 +    renderStatus();
 +  } catch (e) {
 +    dbgLog('INIT_FAIL', String(e && e.stack || e && e.message || e));
@@ -493,7 +542,114 @@
 +    err.style.display = 'block';
 +  }
 +}
++
++// ===== ALLOWLIST FUNCTIONS =====
++var SYSTEM_HOSTS = ['accounts.google.com', 'calendar.google.com', 'chat.google.com', 'classroom.google.com', 'contacts.google.com', 'docs.google.com', 'drive.google.com', 'forms.google.com', 'groups.google.com', 'jamboard.google.com', 'keep.google.com', 'mail.google.com', 'meet.google.com', 'sheets.google.com', 'sites.google.com', 'slides.google.com', 'voice.google.com', 'workspace.google.com'];
++
++function renderAllowlist(userAllowed, pending, nowUtc) {
++  // System tags
++  var sysEl = document.getElementById('system-allowlist-tags');
++  sysEl.innerHTML = '';
++  SYSTEM_HOSTS.forEach(function(h) {
++    var t = document.createElement('span');
++    t.className = 'allowlist-system-tag';
++    t.title = 'System protected, cannot be removed';
++    t.textContent = '\u26D4 ' + h;
++    sysEl.appendChild(t);
++  });
++
++  // User final tags
++  var userEl = document.getElementById('user-allowlist-tags');
++  userEl.innerHTML = '';
++  if (!userAllowed || userAllowed.length === 0) {
++    userEl.innerHTML = '<span class="empty-hint">None added yet</span>';
++  } else {
++    userAllowed.forEach(function(d) {
++      var t = document.createElement('span');
++      t.className = 'allowlist-final-tag';
++      var text = document.createTextNode(d);
++      var btn = document.createElement('button');
++      btn.className = 'btn-remove';
++      btn.textContent = '\u00d7';
++      btn.title = 'Remove from allowlist';
++      btn.onclick = (function(domain) {
++        return function() { removeAllowlistDomain(domain); };
++      })(d);
++      t.appendChild(text);
++      t.appendChild(btn);
++      userEl.appendChild(t);
++    });
++  }
++
++  // Pending tags
++  var pendEl = document.getElementById('pending-allowlist-tags');
++  var pendLabel = document.getElementById('pending-label');
++  pendEl.innerHTML = '';
++  if (!pending || pending.length === 0) {
++    pendLabel.style.display = 'none';
++  } else {
++    pendLabel.style.display = 'block';
++    pending.forEach(function(item) {
++      var domain = item.domain || '';
++      var addedAt = item.addedAt || 0;
++      var secsLeft = addedAt + 259200 - nowUtc;
++      var hoursLeft = Math.ceil(secsLeft / 3600);
++      var label = hoursLeft > 1 ? hoursLeft + 'h remaining' : 'Activating soon';
++      var t = document.createElement('span');
++      t.className = 'allowlist-pending-tag';
++      var text = document.createTextNode(domain + ' \u2014 ' + label);
++      var btn = document.createElement('button');
++      btn.className = 'btn-remove';
++      btn.textContent = '\u00d7';
++      btn.title = 'Cancel review';
++      btn.onclick = (function(d) {
++        return function() { cancelAllowlistPending(d); };
++      })(domain);
++      t.appendChild(text);
++      t.appendChild(btn);
++      pendEl.appendChild(t);
++    });
++  }
++}
++
++async function addAllowlistDomain() {
++  try {
++    var v = document.getElementById('allowlist-input').value.trim().toLowerCase()
++      .replace(/^https?:\/\//, '').replace(/\/$/, '');
++    if (!v) return;
++    var ok = await cr.sendWithPromise('addAllowlistDomain', v);
++    if (ok) {
++      document.getElementById('allowlist-input').value = '';
++      var data = await cr.sendWithPromise('getGodsEyeData');
++      state.userAllowedDomains = data.userAllowedDomains || [];
++      state.allowlistPending = data.allowlistPending || [];
++      renderAllowlist(state.userAllowedDomains, state.allowlistPending, state.nowUtc);
++    }
++  } catch(e) { dbgLog('ADD_ALLOWLIST_FAIL', String(e && e.message || e)); }
++}
++
++async function removeAllowlistDomain(domain) {
++  try {
++    var ok = await cr.sendWithPromise('removeAllowlistDomain', domain);
++    if (ok) {
++      state.userAllowedDomains = state.userAllowedDomains.filter(function(d) { return d !== domain; });
++      renderAllowlist(state.userAllowedDomains, state.allowlistPending, state.nowUtc);
++    }
++  } catch(e) { dbgLog('REMOVE_ALLOWLIST_FAIL', String(e && e.message || e)); }
++}
++
++async function cancelAllowlistPending(domain) {
++  try {
++    var ok = await cr.sendWithPromise('cancelAllowlistPending', domain);
++    if (ok) {
++      state.allowlistPending = state.allowlistPending.filter(function(i) { return i.domain !== domain; });
++      renderAllowlist(state.userAllowedDomains, state.allowlistPending, state.nowUtc);
++    }
++  } catch(e) { dbgLog('CANCEL_PENDING_FAIL', String(e && e.message || e)); }
++}
++
 +document.addEventListener('DOMContentLoaded', function() {
++  document.getElementById('allowlist-input').addEventListener('keydown', function(e) { if (e.key === 'Enter') addAllowlistDomain(); });
 +  document.getElementById('domain-input').addEventListener('keydown', function(e) { if (e.key === 'Enter') addDomain(); });
 +  document.getElementById('keyword-input').addEventListener('keydown', function(e) { if (e.key === 'Enter') addKeyword(); });
 +  init();
@@ -502,7 +658,6 @@
 +</body>
 +</html>
 +)GODS_EYE_HTML";
-+
 +bool ShouldHandleRequest(const std::string& path) {
 +  return true;
 +}
@@ -543,7 +698,7 @@
 +HeliumGodsEyePage::~HeliumGodsEyePage() = default;
 --- a/chrome/browser/ui/webui/gods_eye/gods_eye_handler.h
 +++ b/chrome/browser/ui/webui/gods_eye/gods_eye_handler.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,60 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -553,7 +708,6 @@
 +
 +#include "base/memory/raw_ptr.h"
 +#include "base/values.h"
-+#include "components/prefs/pref_service.h"
 +#include "content/public/browser/browser_context.h"
 +#include "content/public/browser/web_ui_message_handler.h"
 +
@@ -568,40 +722,75 @@
 +  void RegisterMessages() override;
 +
 + private:
++  // Returns all Gods Eye data (blocked domains/keywords, expiry, active state,
++  // user allowlist final list, pending review list). Also promotes any pending
++  // items whose 72-hour review period has elapsed.
 +  void HandleGetGodsEyeData(const base::ListValue& args);
++
++  // Saves blocked domains, keywords, and expiry timestamp; activates Gods Eye.
 +  void HandleSaveGodsEyeData(const base::ListValue& args);
++
++  // Adds a domain to the user-managed blocked list (while active).
 +  void HandleAddDomain(const base::ListValue& args);
++
++  // Adds a keyword to the user-managed blocked list (while active).
 +  void HandleAddKeyword(const base::ListValue& args);
++
++  // Removes a domain from the user-managed blocked list (while active).
 +  void HandleRemoveDomain(const base::ListValue& args);
++
++  // Removes a keyword from the user-managed blocked list (while active).
 +  void HandleRemoveKeyword(const base::ListValue& args);
 +
++  // Adds a domain to the allowlist pending review list with current timestamp.
++  void HandleAddAllowlistDomain(const base::ListValue& args);
++
++  // Removes a domain from the final user allowlist immediately (no review).
++  void HandleRemoveAllowlistDomain(const base::ListValue& args);
++
++  // Cancels a pending allowlist review item.
++  void HandleCancelAllowlistPending(const base::ListValue& args);
++
++  // Checks pending items and promotes those whose 72-hour review has elapsed.
++  // Returns the number of items promoted.
++  int PromoteExpiredPendingItems(double now_utc);
++
 +  raw_ptr<content::BrowserContext> browser_context_;
-+  raw_ptr<PrefService> pref_service_;
 +};
 +
 +#endif  // CHROME_BROWSER_UI_WEBUI_GODS_EYE_GODS_EYE_HANDLER_H_
 --- a/chrome/browser/ui/webui/gods_eye/gods_eye_handler.cc
 +++ b/chrome/browser/ui/webui/gods_eye/gods_eye_handler.cc
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,282 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
 +
 +#include "chrome/browser/ui/webui/gods_eye/gods_eye_handler.h"
 +
-+#include "base/functional/bind.h"
++#include <memory>
++#include <string>
++
 +#include "base/time/time.h"
 +#include "base/values.h"
-+#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/browser_process.h"
 +#include "components/helium_services/gods_eye_pref_names.h"
 +#include "components/prefs/pref_service.h"
 +#include "components/prefs/scoped_user_pref_update.h"
-+#include "content/public/browser/web_ui.h"
++
++namespace {
++
++// 72 hours in seconds.
++constexpr double kReviewPeriodSeconds = 72.0 * 3600.0;
++
++PrefService* GetLocalState() {
++  return g_browser_process->local_state();
++}
++
++}  // namespace
 +
 +GodsEyeHandler::GodsEyeHandler(content::BrowserContext* browser_context)
-+    : browser_context_(browser_context),
-+      pref_service_(
-+          Profile::FromBrowserContext(browser_context)->GetPrefs()) {}
++    : browser_context_(browser_context) {}
 +
 +GodsEyeHandler::~GodsEyeHandler() = default;
 +
@@ -630,129 +819,228 @@
 +      "removeKeyword",
 +      base::BindRepeating(&GodsEyeHandler::HandleRemoveKeyword,
 +                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "addAllowlistDomain",
++      base::BindRepeating(&GodsEyeHandler::HandleAddAllowlistDomain,
++                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "removeAllowlistDomain",
++      base::BindRepeating(&GodsEyeHandler::HandleRemoveAllowlistDomain,
++                          base::Unretained(this)));
++  web_ui()->RegisterMessageCallback(
++      "cancelAllowlistPending",
++      base::BindRepeating(&GodsEyeHandler::HandleCancelAllowlistPending,
++                          base::Unretained(this)));
++}
++
++int GodsEyeHandler::PromoteExpiredPendingItems(double now_utc) {
++  PrefService* local_state = GetLocalState();
++  const base::ListValue& pending =
++      local_state->GetList(prefs::kGodsEyeAllowlistPending);
++
++  base::ListValue new_pending;
++  int promoted = 0;
++
++  for (const auto& item : pending) {
++    if (!item.is_dict())
++      continue;
++    const auto* domain = item.GetDict().FindString("domain");
++    const auto* added_at_val = item.GetDict().Find("addedAt");
++    if (!domain || !added_at_val || !added_at_val->is_double())
++      continue;
++    double added_at = added_at_val->GetDouble();
++    if (now_utc >= added_at + kReviewPeriodSeconds) {
++      // Promote: add to final user allowlist if not already there
++      ScopedListPrefUpdate update(local_state,
++                                  prefs::kGodsEyeUserAllowedDomains);
++      bool already = false;
++      for (const auto& existing : *update) {
++        if (existing.is_string() && existing.GetString() == *domain) {
++          already = true;
++          break;
++        }
++      }
++      if (!already) {
++        update->Append(*domain);
++      }
++      ++promoted;
++    } else {
++      // Keep in pending
++      new_pending.Append(item.Clone());
++    }
++  }
++
++  if (promoted > 0) {
++    local_state->SetList(prefs::kGodsEyeAllowlistPending,
++                         std::move(new_pending));
++  }
++  return promoted;
 +}
 +
 +void GodsEyeHandler::HandleGetGodsEyeData(const base::ListValue& args) {
 +  AllowJavascript();
 +  const std::string& callback_id = args[0].GetString();
 +
-+  const base::ListValue& domains =
-+      pref_service_->GetList(prefs::kGodsEyeBlockedDomains);
-+  const base::ListValue& keywords =
-+      pref_service_->GetList(prefs::kGodsEyeBlockedKeywords);
-+  double expiry = pref_service_->GetDouble(prefs::kGodsEyeExpiryTimestamp);
-+  bool active = pref_service_->GetBoolean(prefs::kGodsEyeActive);
++  double now_utc = base::Time::Now().InSecondsFSinceUnixEpoch();
 +
-+  if (active && expiry > 0.0) {
-+    double now = base::Time::Now().InSecondsFSinceUnixEpoch();
-+    if (now >= expiry) {
-+      pref_service_->SetBoolean(prefs::kGodsEyeActive, false);
-+      active = false;
-+    }
-+  }
++  // Promote any pending items that have cleared the 72-hour review period.
++  PromoteExpiredPendingItems(now_utc);
++
++  PrefService* local_state = GetLocalState();
++
++  const base::ListValue& domains =
++      local_state->GetList(prefs::kGodsEyeBlockedDomains);
++  const base::ListValue& keywords =
++      local_state->GetList(prefs::kGodsEyeBlockedKeywords);
++  const base::ListValue& user_allowed =
++      local_state->GetList(prefs::kGodsEyeUserAllowedDomains);
++  const base::ListValue& pending =
++      local_state->GetList(prefs::kGodsEyeAllowlistPending);
 +
 +  base::DictValue result;
 +  result.Set("domains", domains.Clone());
 +  result.Set("keywords", keywords.Clone());
-+  result.Set("expiryTimestamp", expiry);
-+  result.Set("active", active);
++  result.Set("expiryTimestamp",
++             local_state->GetDouble(prefs::kGodsEyeExpiryTimestamp));
++  result.Set("active", local_state->GetBoolean(prefs::kGodsEyeActive));
++  result.Set("userAllowedDomains", user_allowed.Clone());
++  result.Set("allowlistPending", pending.Clone());
 +
-+  ResolveJavascriptCallback(base::Value(callback_id),
-+                             base::Value(std::move(result)));
++  ResolveJavascriptCallback(base::Value(callback_id), base::Value(std::move(result)));
 +}
 +
 +void GodsEyeHandler::HandleSaveGodsEyeData(const base::ListValue& args) {
-+  AllowJavascript();
 +  const std::string& callback_id = args[0].GetString();
-+
-+  if (args.size() < 4) {
-+    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
-+    return;
-+  }
-+
 +  const base::ListValue* domains = args[1].GetIfList();
 +  const base::ListValue* keywords = args[2].GetIfList();
-+  double expiry = args[3].GetDouble();
++  double ts = args[3].GetDouble();
 +
-+  if (!domains || !keywords || expiry <= 0.0) {
++  if (!domains || !keywords || ts <= 0) {
 +    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
 +    return;
 +  }
 +
-+  pref_service_->SetList(prefs::kGodsEyeBlockedDomains, domains->Clone());
-+  pref_service_->SetList(prefs::kGodsEyeBlockedKeywords, keywords->Clone());
-+  pref_service_->SetDouble(prefs::kGodsEyeExpiryTimestamp, expiry);
-+  pref_service_->SetBoolean(prefs::kGodsEyeActive, true);
++  PrefService* local_state = GetLocalState();
++  local_state->SetList(prefs::kGodsEyeBlockedDomains, domains->Clone());
++  local_state->SetList(prefs::kGodsEyeBlockedKeywords, keywords->Clone());
++  local_state->SetDouble(prefs::kGodsEyeExpiryTimestamp, ts);
++  local_state->SetBoolean(prefs::kGodsEyeActive, true);
 +
 +  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
 +}
 +
 +void GodsEyeHandler::HandleAddDomain(const base::ListValue& args) {
-+  AllowJavascript();
 +  const std::string& callback_id = args[0].GetString();
-+  if (args.size() < 2 || !args[1].is_string()) {
-+    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
-+    return;
-+  }
 +  const std::string& domain = args[1].GetString();
-+  if (domain.empty()) {
-+    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
-+    return;
-+  }
-+  ScopedListPrefUpdate update(pref_service_, prefs::kGodsEyeBlockedDomains);
-+  for (const auto& entry : *update) {
-+    if (entry.is_string() && entry.GetString() == domain) {
-+      ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
-+      return;
-+    }
-+  }
++
++  ScopedListPrefUpdate update(GetLocalState(),
++                              prefs::kGodsEyeBlockedDomains);
 +  update->Append(domain);
++
 +  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
 +}
 +
 +void GodsEyeHandler::HandleAddKeyword(const base::ListValue& args) {
-+  AllowJavascript();
 +  const std::string& callback_id = args[0].GetString();
-+  if (args.size() < 2 || !args[1].is_string()) {
-+    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
-+    return;
-+  }
 +  const std::string& keyword = args[1].GetString();
-+  if (keyword.empty()) {
-+    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
-+    return;
-+  }
-+  ScopedListPrefUpdate update(pref_service_, prefs::kGodsEyeBlockedKeywords);
-+  for (const auto& entry : *update) {
-+    if (entry.is_string() && entry.GetString() == keyword) {
-+      ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
-+      return;
-+    }
-+  }
++
++  ScopedListPrefUpdate update(GetLocalState(),
++                              prefs::kGodsEyeBlockedKeywords);
 +  update->Append(keyword);
++
 +  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
 +}
 +
 +void GodsEyeHandler::HandleRemoveDomain(const base::ListValue& args) {
-+  AllowJavascript();
 +  const std::string& callback_id = args[0].GetString();
-+  if (args.size() < 2 || !args[1].is_string()) {
-+    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
-+    return;
-+  }
-+  ScopedListPrefUpdate update(pref_service_, prefs::kGodsEyeBlockedDomains);
-+  update->EraseValue(base::Value(args[1].GetString()));
++  const std::string& domain = args[1].GetString();
++
++  ScopedListPrefUpdate update(GetLocalState(),
++                              prefs::kGodsEyeBlockedDomains);
++  update->EraseValue(base::Value(domain));
++
 +  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
 +}
 +
 +void GodsEyeHandler::HandleRemoveKeyword(const base::ListValue& args) {
-+  AllowJavascript();
 +  const std::string& callback_id = args[0].GetString();
-+  if (args.size() < 2 || !args[1].is_string()) {
++  const std::string& keyword = args[1].GetString();
++
++  ScopedListPrefUpdate update(GetLocalState(),
++                              prefs::kGodsEyeBlockedKeywords);
++  update->EraseValue(base::Value(keyword));
++
++  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
++}
++
++void GodsEyeHandler::HandleAddAllowlistDomain(const base::ListValue& args) {
++  const std::string& callback_id = args[0].GetString();
++  const std::string& domain = args[1].GetString();
++
++  if (domain.empty()) {
 +    ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
 +    return;
 +  }
-+  ScopedListPrefUpdate update(pref_service_, prefs::kGodsEyeBlockedKeywords);
-+  update->EraseValue(base::Value(args[1].GetString()));
++
++  PrefService* local_state = GetLocalState();
++
++  // Don't add if already in the final allowlist.
++  const base::ListValue& final_list =
++      local_state->GetList(prefs::kGodsEyeUserAllowedDomains);
++  for (const auto& item : final_list) {
++    if (item.is_string() && item.GetString() == domain) {
++      ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
++      return;
++    }
++  }
++
++  // Don't add if already pending.
++  const base::ListValue& pending =
++      local_state->GetList(prefs::kGodsEyeAllowlistPending);
++  for (const auto& item : pending) {
++    if (!item.is_dict())
++      continue;
++    const auto* d = item.GetDict().FindString("domain");
++    if (d && *d == domain) {
++      ResolveJavascriptCallback(base::Value(callback_id), base::Value(false));
++      return;
++    }
++  }
++
++  // Add to pending with current timestamp.
++  ScopedListPrefUpdate update(local_state, prefs::kGodsEyeAllowlistPending);
++  base::DictValue entry;
++  entry.Set("domain", domain);
++  entry.Set("addedAt", base::Time::Now().InSecondsFSinceUnixEpoch());
++  update->Append(std::move(entry));
++
++  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
++}
++
++void GodsEyeHandler::HandleRemoveAllowlistDomain(const base::ListValue& args) {
++  const std::string& callback_id = args[0].GetString();
++  const std::string& domain = args[1].GetString();
++
++  ScopedListPrefUpdate update(GetLocalState(),
++                              prefs::kGodsEyeUserAllowedDomains);
++  update->EraseValue(base::Value(domain));
++
++  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
++}
++
++void GodsEyeHandler::HandleCancelAllowlistPending(
++    const base::ListValue& args) {
++  const std::string& callback_id = args[0].GetString();
++  const std::string& domain = args[1].GetString();
++
++  ScopedListPrefUpdate update(GetLocalState(),
++                              prefs::kGodsEyeAllowlistPending);
++  update->EraseIf([&domain](const base::Value& item) {
++    if (!item.is_dict())
++      return false;
++    const auto* d = item.GetDict().FindString("domain");
++    return d && *d == domain;
++  });
++
 +  ResolveJavascriptCallback(base::Value(callback_id), base::Value(true));
 +}

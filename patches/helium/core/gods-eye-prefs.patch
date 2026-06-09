@@ -1,6 +1,6 @@
 --- a/components/helium_services/gods_eye_pref_names.h
 +++ b/components/helium_services/gods_eye_pref_names.h
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,37 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -10,7 +10,8 @@
 +
 +namespace prefs {
 +
-+// God's Eye feature prefs
++// God's Eye feature prefs — stored in local_state to share across all profiles.
++
 +inline constexpr char kGodsEyeBlockedDomains[] =
 +    "helium.gods_eye.blocked_domains";
 +
@@ -23,6 +24,16 @@
 +
 +inline constexpr char kGodsEyeActive[] =
 +    "helium.gods_eye.active";
++
++// User-managed allowlist: domains approved after the 72-hour review period.
++// Each entry is a plain string (domain name).
++inline constexpr char kGodsEyeUserAllowedDomains[] =
++    "helium.gods_eye.user_allowed_domains";
++
++// Pending allowlist items under 72-hour review.
++// Each entry is a dict: {domain: string, addedAt: double (UTC Unix seconds)}.
++inline constexpr char kGodsEyeAllowlistPending[] =
++    "helium.gods_eye.allowlist_pending";
 +
 +}  // namespace prefs
 +
@@ -37,15 +48,29 @@
  #include "components/helium_services/pref_names.h"
  #include "components/policy/core/common/policy_pref_names.h"
  #include "components/pref_registry/pref_registry_syncable.h"
-@@ -253,6 +254,11 @@
-     registry->RegisterBooleanPref(prefs::kHeliumUBlockAssetsEnabled, true);
-   }
+--- a/chrome/browser/prefs/browser_prefs.cc
++++ b/chrome/browser/prefs/browser_prefs.cc
+@@ -32,6 +32,8 @@
+ #include "chrome/browser/external_protocol/external_protocol_handler.h"
+ #include "chrome/browser/finds/core/finds_service.h"
+ #include "chrome/browser/first_run/first_run.h"
++#include "chrome/browser/gods_eye/gods_eye_allowlist.h"
++#include "components/helium_services/gods_eye_pref_names.h"
+ #include "chrome/browser/glic/glic_pref_names.h"
+ #include "chrome/browser/glic/suggestions/contextual_cueing_prefs.h"
+ #include "chrome/browser/gpu/gpu_mode_manager.h"
+@@ -1679,6 +1681,14 @@
+       policy::policy_prefs::kLocalNetworkAccessPermissionsPolicyDefaultEnabled,
+       false);
  
++  // Gods Eye feature prefs -- in local_state to share across all profiles.
 +  registry->RegisterListPref(prefs::kGodsEyeBlockedDomains);
 +  registry->RegisterListPref(prefs::kGodsEyeBlockedKeywords);
 +  registry->RegisterDoublePref(prefs::kGodsEyeExpiryTimestamp, 0.0);
 +  registry->RegisterBooleanPref(prefs::kGodsEyeActive, false);
++  registry->RegisterListPref(prefs::kGodsEyeUserAllowedDomains);
++  registry->RegisterListPref(prefs::kGodsEyeAllowlistPending);
 +
-   registry->RegisterBooleanPref(
-       prefs::kHttpsOnlyModeEnabled, false,
-       user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
+   // This is intentionally last.
+   RegisterLocalStatePrefsForMigration(registry);
+ }

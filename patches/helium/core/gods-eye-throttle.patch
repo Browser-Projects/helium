@@ -1,6 +1,6 @@
 --- a/chrome/browser/gods_eye/BUILD.gn
 +++ b/chrome/browser/gods_eye/BUILD.gn
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,24 @@
 +# Copyright 2025 The Helium Authors
 +# You can use, redistribute, and/or modify this source code under
 +# the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -15,6 +15,7 @@
 +  ]
 +  deps = [
 +    "//base",
++    "//chrome/browser:browser_process",
 +    "//chrome/browser/profiles:profile",
 +    "//chrome/common",
 +    "//components/helium_services:helium_services",
@@ -95,7 +96,7 @@
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_ALLOWLIST_H_
 --- a/chrome/browser/gods_eye/gods_eye_dom_observer.h
 +++ b/chrome/browser/gods_eye/gods_eye_dom_observer.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,52 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -103,10 +104,8 @@
 +#ifndef CHROME_BROWSER_GODS_EYE_GODS_EYE_DOM_OBSERVER_H_
 +#define CHROME_BROWSER_GODS_EYE_GODS_EYE_DOM_OBSERVER_H_
 +
-+#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
 +#include "base/values.h"
-+#include "components/prefs/pref_service.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/public/browser/web_contents_user_data.h"
 +
@@ -119,8 +118,8 @@
 +
 +// Observes a WebContents and, after main-frame loads finish, scans the
 +// rendered DOM (body innerText + title + og:title) for any blocked keyword
-+// stored in the user's Gods Eye prefs. If a match is found, redirects the tab
-+// to chrome://restricted-page with the matched keyword.
++// stored in the Gods Eye prefs (local_state, shared across all profiles).
++// If a match is found, redirects the tab to chrome://restricted-page.
 +class GodsEyeDomObserver
 +    : public content::WebContentsObserver,
 +      public content::WebContentsUserData<GodsEyeDomObserver> {
@@ -138,8 +137,8 @@
 +
 +  explicit GodsEyeDomObserver(content::WebContents* web_contents);
 +
-+  // Returns true if the Gods Eye feature is currently active for this profile.
-+  bool IsGodsEyeActive(PrefService* prefs) const;
++  // Returns true if Gods Eye is currently active (reads from local_state).
++  bool IsGodsEyeActive() const;
 +
 +  // Called by the renderer once the injected scan script finishes.
 +  void OnScanResult(base::Value result);
@@ -152,7 +151,7 @@
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_DOM_OBSERVER_H_
 --- a/chrome/browser/gods_eye/gods_eye_dom_observer.cc
 +++ b/chrome/browser/gods_eye/gods_eye_dom_observer.cc
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,224 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -170,6 +169,7 @@
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/time/time.h"
 +#include "base/values.h"
++#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/gods_eye/gods_eye_allowlist.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/common/webui_url_constants.h"
@@ -187,14 +187,45 @@
 +
 +namespace {
 +
-+// Returns true if the URL is one we must not scan/redirect from.
++PrefService* GetLocalState() {
++  return g_browser_process ? g_browser_process->local_state() : nullptr;
++}
++
 +bool IsExcludedURL(const GURL& url) {
-+  if (!url.is_valid()) {
++  if (!url.is_valid())
 +    return true;
-+  }
-+  // Only scan real web content.
-+  if (!url.SchemeIsHTTPOrHTTPS()) {
++  if (!url.SchemeIsHTTPOrHTTPS())
 +    return true;
++  return false;
++}
++
++bool IsUserAllowedHost(const GURL& url) {
++  if (!url.has_host())
++    return false;
++  std::string host(url.host());
++  if (base::StartsWith(host, "www.", base::CompareCase::INSENSITIVE_ASCII))
++    host = host.substr(4);
++
++  PrefService* local_state = GetLocalState();
++  if (!local_state)
++    return false;
++
++  const base::ListValue& user_allowed =
++      local_state->GetList(prefs::kGodsEyeUserAllowedDomains);
++  for (const auto& entry : user_allowed) {
++    if (!entry.is_string())
++      continue;
++    std::string allowed = entry.GetString();
++    if (base::StartsWith(allowed, "www.",
++                         base::CompareCase::INSENSITIVE_ASCII)) {
++      allowed = allowed.substr(4);
++    }
++    if (base::EqualsCaseInsensitiveASCII(host, allowed))
++      return true;
++    if (base::EndsWith(host, "." + allowed,
++                       base::CompareCase::INSENSITIVE_ASCII)) {
++      return true;
++    }
 +  }
 +  return false;
 +}
@@ -207,17 +238,16 @@
 +
 +GodsEyeDomObserver::~GodsEyeDomObserver() = default;
 +
-+bool GodsEyeDomObserver::IsGodsEyeActive(PrefService* prefs) const {
-+  if (!prefs || !prefs->GetBoolean(prefs::kGodsEyeActive)) {
++bool GodsEyeDomObserver::IsGodsEyeActive() const {
++  PrefService* local_state = GetLocalState();
++  if (!local_state || !local_state->GetBoolean(prefs::kGodsEyeActive))
 +    return false;
-+  }
-+  double expiry = prefs->GetDouble(prefs::kGodsEyeExpiryTimestamp);
-+  if (expiry <= 0.0) {
++  double expiry = local_state->GetDouble(prefs::kGodsEyeExpiryTimestamp);
++  if (expiry <= 0.0)
 +    return false;
-+  }
 +  double now = base::Time::Now().InSecondsFSinceUnixEpoch();
 +  if (now >= expiry) {
-+    prefs->SetBoolean(prefs::kGodsEyeActive, false);
++    local_state->SetBoolean(prefs::kGodsEyeActive, false);
 +    return false;
 +  }
 +  return true;
@@ -226,67 +256,59 @@
 +void GodsEyeDomObserver::DidFinishLoad(
 +    content::RenderFrameHost* render_frame_host,
 +    const GURL& validated_url) {
-+  // Only scan the primary main frame; ignore subframes/iframes.
 +  if (!render_frame_host ||
 +      render_frame_host != web_contents()->GetPrimaryMainFrame()) {
 +    return;
 +  }
 +
-+  // Skip non-web pages and internal pages.
-+  if (IsExcludedURL(validated_url)) {
++  if (IsExcludedURL(validated_url))
 +    return;
-+  }
 +
-+  // Skip hardcoded allowlisted domains (Google Workspace, etc.).
-+  if (IsGodsEyeAllowedHost(validated_url)) {
++  // Skip hardcoded system allowlist.
++  if (IsGodsEyeAllowedHost(validated_url))
 +    return;
-+  }
 +
-+  // Off-the-record / system profiles: do nothing.
++  // Skip user allowlist (final approved domains).
++  if (IsUserAllowedHost(validated_url))
++    return;
++
 +  Profile* profile = Profile::FromBrowserContext(
 +      web_contents()->GetBrowserContext());
-+  if (!profile || profile->IsOffTheRecord()) {
++  if (!profile || profile->IsOffTheRecord())
 +    return;
-+  }
 +
-+  PrefService* prefs = profile->GetPrefs();
-+  if (!IsGodsEyeActive(prefs)) {
++  if (!IsGodsEyeActive())
 +    return;
-+  }
++
++  PrefService* local_state = GetLocalState();
++  if (!local_state)
++    return;
 +
 +  const base::ListValue& keywords =
-+      prefs->GetList(prefs::kGodsEyeBlockedKeywords);
-+  if (keywords.empty()) {
++      local_state->GetList(prefs::kGodsEyeBlockedKeywords);
++  if (keywords.empty())
 +    return;
-+  }
 +
-+  // Build a JSON-escaped JS array literal of lowercased keywords.
 +  std::string js_array = "[";
 +  bool first = true;
 +  for (const auto& entry : keywords) {
-+    if (!entry.is_string()) {
++    if (!entry.is_string())
 +      continue;
-+    }
 +    std::string kw = base::ToLowerASCII(entry.GetString());
-+    if (kw.empty()) {
++    if (kw.empty())
 +      continue;
-+    }
 +    std::string quoted;
 +    base::EscapeJSONString(kw, /*put_in_quotes=*/true, &quoted);
-+    if (!first) {
++    if (!first)
 +      js_array += ",";
-+    }
 +    js_array += quoted;
 +    first = false;
 +  }
 +  js_array += "]";
 +
-+  if (first) {  // no valid keywords
++  if (first)
 +    return;
-+  }
 +
-+  // Inject a small JS snippet that scans body innerText + title + og:title for
-+  // any of the keywords. Returns the matched keyword string, or empty string.
 +  std::string script =
 +      "(function(){"
 +      "  try {"
@@ -311,26 +333,20 @@
 +}
 +
 +void GodsEyeDomObserver::OnScanResult(base::Value result) {
-+  if (!result.is_string()) {
++  if (!result.is_string())
 +    return;
-+  }
 +  const std::string& matched = result.GetString();
-+  if (matched.empty()) {
++  if (matched.empty())
 +    return;
-+  }
 +
-+  // Re-check active state in case it expired between scan dispatch and result.
-+  Profile* profile = Profile::FromBrowserContext(
-+      web_contents()->GetBrowserContext());
-+  if (!profile) {
++  if (!IsGodsEyeActive())
 +    return;
-+  }
-+  PrefService* prefs = profile->GetPrefs();
-+  if (!IsGodsEyeActive(prefs)) {
-+    return;
-+  }
 +
-+  double expiry = prefs->GetDouble(prefs::kGodsEyeExpiryTimestamp);
++  PrefService* local_state = GetLocalState();
++  if (!local_state)
++    return;
++
++  double expiry = local_state->GetDouble(prefs::kGodsEyeExpiryTimestamp);
 +  std::string redirect_url_str =
 +      std::string(chrome::kHeliumRestrictedPageURL) +
 +      "/?reason=dom-keyword&value=" +
@@ -338,8 +354,6 @@
 +      "&expiry=" +
 +      base::NumberToString(static_cast<int64_t>(expiry));
 +
-+  // Use PostTask + OpenURL to avoid any re-entrancy issues. The JS callback
-+  // may fire while the web contents is in an arbitrary navigation state.
 +  content::OpenURLParams params(
 +      GURL(redirect_url_str),
 +      content::Referrer(),
@@ -364,7 +378,7 @@
 +WEB_CONTENTS_USER_DATA_KEY_IMPL(GodsEyeDomObserver);
 --- a/chrome/browser/gods_eye/gods_eye_navigation_throttle.h
 +++ b/chrome/browser/gods_eye/gods_eye_navigation_throttle.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,50 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -374,9 +388,7 @@
 +
 +#include <string>
 +
-+#include "base/memory/raw_ptr.h"
 +#include "base/memory/weak_ptr.h"
-+#include "components/prefs/pref_service.h"
 +#include "content/public/browser/navigation_throttle.h"
 +
 +namespace content {
@@ -390,8 +402,7 @@
 +  static void MaybeCreateAndAdd(content::NavigationThrottleRegistry& registry);
 +
 +  explicit GodsEyeNavigationThrottle(
-+      content::NavigationThrottleRegistry& registry,
-+      PrefService* prefs);
++      content::NavigationThrottleRegistry& registry);
 +  ~GodsEyeNavigationThrottle() override;
 +
 +  GodsEyeNavigationThrottle(const GodsEyeNavigationThrottle&) = delete;
@@ -414,14 +425,13 @@
 +  ThrottleCheckResult RedirectToRestrictedPage(const std::string& reason,
 +                                               const std::string& value);
 +
-+  raw_ptr<PrefService> pref_service_;
 +  base::WeakPtrFactory<GodsEyeNavigationThrottle> weak_factory_{this};
 +};
 +
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_NAVIGATION_THROTTLE_H_
 --- a/chrome/browser/gods_eye/gods_eye_navigation_throttle.cc
 +++ b/chrome/browser/gods_eye/gods_eye_navigation_throttle.cc
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,250 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -435,6 +445,7 @@
 +#include "base/strings/string_util.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "base/time/time.h"
++#include "chrome/browser/browser_process.h"
 +#include "chrome/browser/gods_eye/gods_eye_allowlist.h"
 +#include "chrome/browser/profiles/profile.h"
 +#include "chrome/common/webui_url_constants.h"
@@ -447,6 +458,14 @@
 +#include "content/public/browser/web_contents.h"
 +#include "ui/base/page_transition_types.h"
 +#include "url/gurl.h"
++
++namespace {
++
++PrefService* GetLocalState() {
++  return g_browser_process->local_state();
++}
++
++}  // namespace
 +
 +// static
 +void GodsEyeNavigationThrottle::MaybeCreateAndAdd(
@@ -471,18 +490,18 @@
 +  if (!profile || profile->IsOffTheRecord())
 +    return;
 +
-+  PrefService* prefs = profile->GetPrefs();
-+  if (!prefs->GetBoolean(prefs::kGodsEyeActive))
++  // All prefs are in local_state — no need to pass PrefService.
++  PrefService* local_state = GetLocalState();
++  if (!local_state || !local_state->GetBoolean(prefs::kGodsEyeActive))
 +    return;
 +
 +  registry.AddThrottle(
-+      std::make_unique<GodsEyeNavigationThrottle>(registry, prefs));
++      std::make_unique<GodsEyeNavigationThrottle>(registry));
 +}
 +
 +GodsEyeNavigationThrottle::GodsEyeNavigationThrottle(
-+    content::NavigationThrottleRegistry& registry,
-+    PrefService* prefs)
-+    : content::NavigationThrottle(registry), pref_service_(prefs) {}
++    content::NavigationThrottleRegistry& registry)
++    : content::NavigationThrottle(registry) {}
 +
 +GodsEyeNavigationThrottle::~GodsEyeNavigationThrottle() = default;
 +
@@ -501,23 +520,56 @@
 +}
 +
 +bool GodsEyeNavigationThrottle::IsGodsEyeActive() const {
-+  if (!pref_service_->GetBoolean(prefs::kGodsEyeActive))
++  PrefService* local_state = GetLocalState();
++  if (!local_state || !local_state->GetBoolean(prefs::kGodsEyeActive))
 +    return false;
 +
-+  double expiry = pref_service_->GetDouble(prefs::kGodsEyeExpiryTimestamp);
++  double expiry = local_state->GetDouble(prefs::kGodsEyeExpiryTimestamp);
 +  if (expiry <= 0.0)
 +    return false;
 +
 +  double now = base::Time::Now().InSecondsFSinceUnixEpoch();
 +  if (now >= expiry) {
-+    pref_service_->SetBoolean(prefs::kGodsEyeActive, false);
++    local_state->SetBoolean(prefs::kGodsEyeActive, false);
 +    return false;
 +  }
 +  return true;
 +}
 +
 +bool GodsEyeNavigationThrottle::IsAllowedHost(const GURL& url) const {
-+  return IsGodsEyeAllowedHost(url);
++  // 1. Check hardcoded system allowlist.
++  if (IsGodsEyeAllowedHost(url))
++    return true;
++
++  // 2. Check user-managed allowlist (final/approved domains).
++  if (!url.has_host())
++    return false;
++  std::string host(url.host());
++  if (base::StartsWith(host, "www.", base::CompareCase::INSENSITIVE_ASCII))
++    host = host.substr(4);
++
++  PrefService* local_state = GetLocalState();
++  if (!local_state)
++    return false;
++
++  const base::ListValue& user_allowed =
++      local_state->GetList(prefs::kGodsEyeUserAllowedDomains);
++  for (const auto& entry : user_allowed) {
++    if (!entry.is_string())
++      continue;
++    std::string allowed = entry.GetString();
++    if (base::StartsWith(allowed, "www.",
++                         base::CompareCase::INSENSITIVE_ASCII)) {
++      allowed = allowed.substr(4);
++    }
++    if (base::EqualsCaseInsensitiveASCII(host, allowed))
++      return true;
++    if (base::EndsWith(host, "." + allowed,
++                       base::CompareCase::INSENSITIVE_ASCII)) {
++      return true;
++    }
++  }
++  return false;
 +}
 +
 +std::string GodsEyeNavigationThrottle::MatchesDomain(const GURL& url) const {
@@ -528,8 +580,12 @@
 +  if (base::StartsWith(host, "www.", base::CompareCase::INSENSITIVE_ASCII))
 +    host = host.substr(4);
 +
++  PrefService* local_state = GetLocalState();
++  if (!local_state)
++    return std::string();
++
 +  const base::ListValue& domains =
-+      pref_service_->GetList(prefs::kGodsEyeBlockedDomains);
++      local_state->GetList(prefs::kGodsEyeBlockedDomains);
 +
 +  for (const auto& entry : domains) {
 +    if (!entry.is_string())
@@ -551,8 +607,13 @@
 +
 +std::string GodsEyeNavigationThrottle::MatchesKeyword(const GURL& url) const {
 +  std::string url_lower = base::ToLowerASCII(url.spec());
++
++  PrefService* local_state = GetLocalState();
++  if (!local_state)
++    return std::string();
++
 +  const base::ListValue& keywords =
-+      pref_service_->GetList(prefs::kGodsEyeBlockedKeywords);
++      local_state->GetList(prefs::kGodsEyeBlockedKeywords);
 +
 +  for (const auto& entry : keywords) {
 +    if (!entry.is_string())
@@ -568,18 +629,16 @@
 +GodsEyeNavigationThrottle::RedirectToRestrictedPage(
 +    const std::string& reason,
 +    const std::string& value) {
-+  double expiry = pref_service_->GetDouble(prefs::kGodsEyeExpiryTimestamp);
++  PrefService* local_state = GetLocalState();
++  double expiry =
++      local_state ? local_state->GetDouble(prefs::kGodsEyeExpiryTimestamp)
++                  : 0.0;
 +  std::string redirect_url_str =
 +      std::string(chrome::kHeliumRestrictedPageURL) + "/?reason=" +
 +      base::EscapeQueryParamValue(reason, false) + "&value=" +
 +      base::EscapeQueryParamValue(value, false) + "&expiry=" +
 +      base::NumberToString(static_cast<int64_t>(expiry));
 +
-+  // Build OpenURLParams from the current navigation handle, then override the
-+  // URL. We must NOT call GetController().LoadURL() here because we are inside
-+  // a NavigationThrottle callback — doing so fires a DCHECK in Chromium's
-+  // navigation machinery. Instead, schedule the new navigation asynchronously
-+  // so it executes after the throttle stack has fully unwound.
 +  content::OpenURLParams params =
 +      content::OpenURLParams::FromNavigationHandle(navigation_handle());
 +  params.url = GURL(redirect_url_str);
@@ -599,8 +658,6 @@
 +          },
 +          std::move(weak_wc), std::move(params)));
 +
-+  // CANCEL_AND_IGNORE: stop the original navigation and pretend it never
-+  // happened; the PostTask above will navigate to the restricted page.
 +  return CANCEL_AND_IGNORE;
 +}
 +
@@ -611,7 +668,7 @@
 +
 +  const GURL& url = navigation_handle()->GetURL();
 +
-+  // Hard-coded allowlist: always allow these regardless of user settings.
++  // Hard-coded + user allowlist: always allow these.
 +  if (IsAllowedHost(url))
 +    return PROCEED;
 +
