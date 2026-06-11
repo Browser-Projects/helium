@@ -86,7 +86,7 @@
 +#endif  // CHROME_BROWSER_UI_WEBUI_GODS_EYE_GODS_EYE_UI_H_
 --- a/chrome/browser/ui/webui/gods_eye/gods_eye_ui.cc
 +++ b/chrome/browser/ui/webui/gods_eye/gods_eye_ui.cc
-@@ -0,0 +1,604 @@
+@@ -0,0 +1,892 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -289,6 +289,34 @@
 +      <button class="btn-add" onclick="requestAddAllowlist()">Request Add</button>
 +    </div>
 +  </div>
++  </div>
++  <div class="card">
++    <div class="card-title">&#128190; Backup &amp; Restore</div>
++    <div class="time-note" style="margin-bottom:10px">
++      Export your current block lists and allowed domains as a JSON file,
++      or import from a previously exported backup.
++      <strong>Lock duration is never exported or imported.</strong>
++      Imports only append &mdash; existing entries are never replaced or removed.
++      Imported allowed domains go through the standard 72-hour review window.
++    </div>
++    <div class="row">
++      <button class="btn-add" onclick="exportBackup()">Export</button>
++      <button class="btn-add" onclick="document.getElementById('import-file').click()">Import</button>
++      <input type="file" id="import-file" accept=".json,application/json"
++             style="display:none" onchange="onImportFile(this.files)" />
++    </div>
++    <div id="import-feedback" class="time-note" style="margin-top:10px"></div>
++    <div id="import-preview" style="display:none; margin-top:12px; padding:12px;
++         border:1px solid var(--border); border-radius:var(--radius); background:var(--bg);">
++      <div style="font-weight:600; margin-bottom:8px;">Review import</div>
++      <div id="import-preview-summary" style="font-size:13px; line-height:1.6;"></div>
++      <div class="row" style="margin-top:10px;">
++        <button class="btn-add" onclick="applyImport()">Confirm Import</button>
++        <button class="btn-add" onclick="cancelImport()"
++                style="background:var(--bg); color:var(--text-muted); border:1px solid var(--border);">Cancel</button>
++      </div>
++    </div>
++  </div>
 +  <div id="save-error"></div>
 +  <button class="btn-save" id="save-btn" onclick="saveData()">&#128274; Save &amp; Lock</button>
 +  <div id="debug-panel">
@@ -458,16 +486,28 @@
 +    dbgLog('INIT_FAIL', String(e && e.stack || e && e.message || e));
 +  }
 +}
++function showAddError(inputId, msg) {
++  var inp = document.getElementById(inputId);
++  if (!inp) return;
++  var prev = inp.title;
++  inp.style.borderColor = '#c0392b';
++  inp.title = msg;
++  setTimeout(function() { inp.style.borderColor = ''; inp.title = prev || ''; }, 2200);
++}
 +async function addDomain() {
 +  try {
 +    var v = document.getElementById('domain-input').value.trim().toLowerCase()
 +      .replace(/^https?:\/\//, '').replace(/\/$/, '');
 +    if (!v) return;
++    if (state.domains.indexOf(v) !== -1) {
++      showAddError('domain-input', 'Already in blocked domains');
++      return;
++    }
 +    if (state.active) {
 +      var ok = await cr.sendWithPromise('addDomain', v);
 +      if (ok) { state.domains.push(v); renderTags('domains-list', state.domains, removeDomain); }
 +    } else {
-+      if (!state.domains.includes(v)) state.domains.push(v);
++      state.domains.push(v);
 +      renderTags('domains-list', state.domains, removeDomain);
 +    }
 +    document.getElementById('domain-input').value = '';
@@ -479,11 +519,15 @@
 +  try {
 +    var v = document.getElementById('keyword-input').value.trim().toLowerCase();
 +    if (!v) return;
++    if (state.keywords.indexOf(v) !== -1) {
++      showAddError('keyword-input', 'Already in blocked keywords');
++      return;
++    }
 +    if (state.active) {
 +      var ok = await cr.sendWithPromise('addKeyword', v);
 +      if (ok) { state.keywords.push(v); renderTags('keywords-list', state.keywords, removeKeyword); }
 +    } else {
-+      if (!state.keywords.includes(v)) state.keywords.push(v);
++      state.keywords.push(v);
 +      renderTags('keywords-list', state.keywords, removeKeyword);
 +    }
 +    document.getElementById('keyword-input').value = '';
@@ -580,8 +624,22 @@
 +async function requestAddAllowlist() {
 +  try {
 +    var inp = document.getElementById('allowlist-input');
-+    var v = inp.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
++    var v = inp.value.trim().toLowerCase()
++      .replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
 +    if (!v || v.indexOf('.') === -1) return;
++    var hardcoded = window.godsEyeHardcodedDomains || [];
++    if (hardcoded.indexOf(v) !== -1) {
++      showAddError('allowlist-input', 'Already in hardcoded allowlist');
++      return;
++    }
++    if (state.userAllowedDomains.some(function(e) { return e.domain === v; })) {
++      showAddError('allowlist-input', 'Already in active allowlist');
++      return;
++    }
++    if (state.allowlistPending.some(function(e) { return e.domain === v; })) {
++      showAddError('allowlist-input', 'Already pending review');
++      return;
++    }
 +    var ok = await cr.sendWithPromise('addAllowlistDomain', v);
 +    if (ok) {
 +      state.allowlistPending.push({domain: v, requested_at: state.nowUtc});
@@ -612,6 +670,236 @@
 +    }
 +  } catch (e) {
 +    dbgLog('CANCEL_ALLOWLIST_FAIL', String(e && e.stack || e && e.message || e));
++  }
++}
++// ===== Backup & Restore (Export / Import) =====
++// Threat model: the only trust boundary is user-now binding user-future
++// against tampering during an active lock. Therefore:
++//   * Lock duration (expiryTimestamp) and active state are NEVER exported.
++//   * Imports only APPEND novel entries; never remove or replace.
++//   * Imported allowed-domain entries always enter the 72h pending queue
++//     with requested_at = now -- per-entry timestamps from JSON are ignored.
++//   * Strict validation (size cap, length cap, type cap) on imports.
++function showImportFeedback(msg, isError) {
++  var el = document.getElementById('import-feedback');
++  if (!el) return;
++  el.textContent = msg || '';
++  el.style.color = isError ? '#c0392b' : 'var(--text-muted)';
++}
++async function exportBackup() {
++  try {
++    // Pull fresh data so the export is always consistent with the backend,
++    // even if local state has drifted.
++    var data = await cr.sendWithPromise('getGodsEyeData');
++    var payload = {
++      version: '1',
++      exportedAt: new Date().toISOString(),
++      blockedDomains: (data.domains || []).filter(function(s) { return typeof s === 'string'; }),
++      blockedKeywords: (data.keywords || []).filter(function(s) { return typeof s === 'string'; }),
++      userAllowedDomains: (data.userAllowedDomains || [])
++        .map(function(e) { return e && e.domain; })
++        .filter(function(d) { return typeof d === 'string' && d.length > 0; })
++      // Intentionally NOT exported: expiryTimestamp, active, allowlistPending,
++      // per-entry timestamps. Doing so would create tamper loopholes.
++    };
++    var json = JSON.stringify(payload, null, 2);
++    var blob = new Blob([json], {type: 'application/json'});
++    var url = URL.createObjectURL(blob);
++    var a = document.createElement('a');
++    a.href = url;
++    var stamp = new Date().toISOString().slice(0, 10);
++    a.download = 'godsEyeBackup-' + stamp + '.json';
++    document.body.appendChild(a);
++    a.click();
++    document.body.removeChild(a);
++    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
++    showImportFeedback('Exported ' + payload.blockedDomains.length + ' blocked domains, '
++      + payload.blockedKeywords.length + ' blocked keywords, '
++      + payload.userAllowedDomains.length + ' allowed domains.', false);
++  } catch (e) {
++    dbgLog('EXPORT_FAIL', String(e && e.stack || e && e.message || e));
++    showImportFeedback('Export failed (see debug log).', true);
++  }
++}
++var _pendingImport = null;
++function cancelImport() {
++  _pendingImport = null;
++  var p = document.getElementById('import-preview');
++  if (p) p.style.display = 'none';
++  var f = document.getElementById('import-file');
++  if (f) f.value = '';
++  showImportFeedback('', false);
++}
++async function onImportFile(files) {
++  try {
++    if (!files || !files.length) return;
++    var file = files[0];
++    var MAX_BYTES = 5 * 1024 * 1024;  // 5 MB
++    if (file.size > MAX_BYTES) {
++      showImportFeedback('File too large (max 5 MB).', true);
++      cancelImport();
++      return;
++    }
++    var text = await file.text();
++    var parsed;
++    try { parsed = JSON.parse(text); }
++    catch (e) {
++      showImportFeedback('Invalid JSON.', true); cancelImport(); return;
++    }
++    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
++      showImportFeedback('JSON must be an object.', true); cancelImport(); return;
++    }
++    if (parsed.version != null && parsed.version !== '1') {
++      showImportFeedback('Unsupported backup version: ' + String(parsed.version), true);
++      cancelImport();
++      return;
++    }
++    var preview = validateImport(parsed);
++    _pendingImport = preview;
++    showImportPreview(preview);
++  } catch (e) {
++    dbgLog('IMPORT_PARSE_FAIL', String(e && e.stack || e && e.message || e));
++    showImportFeedback('Import failed (see debug log).', true);
++    cancelImport();
++  }
++}
++function validateImport(parsed) {
++  var MAX_ITEMS = 10000;
++  var MAX_DOMAIN_LEN = 253;
++  var MAX_KEYWORD_LEN = 200;
++  function normDomain(v) {
++    return String(v == null ? '' : v).trim().toLowerCase()
++      .replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^www\./, '');
++  }
++  function normKeyword(v) {
++    return String(v == null ? '' : v).trim().toLowerCase();
++  }
++  function isValidDomain(d) {
++    return d.length > 0 && d.length <= MAX_DOMAIN_LEN && d.indexOf('.') !== -1;
++  }
++  function isValidKeyword(k) {
++    return k.length > 0 && k.length <= MAX_KEYWORD_LEN;
++  }
++  function asArray(x) {
++    return Array.isArray(x) ? x.slice(0, MAX_ITEMS) : [];
++  }
++  var rawDomains = asArray(parsed.blockedDomains);
++  var rawKeywords = asArray(parsed.blockedKeywords);
++  var rawAllowlist = asArray(parsed.userAllowedDomains);
++  var rejected = 0;
++  function bucket(raw, norm, valid) {
++    var out = [], seen = {};
++    for (var i = 0; i < raw.length; i++) {
++      var n = norm(raw[i]);
++      if (!valid(n)) { rejected++; continue; }
++      if (seen[n]) continue;  // dedup within file
++      seen[n] = true;
++      out.push(n);
++    }
++    return out;
++  }
++  var inDomains = bucket(rawDomains, normDomain, isValidDomain);
++  var inKeywords = bucket(rawKeywords, normKeyword, isValidKeyword);
++  var inAllowlist = bucket(rawAllowlist, normDomain, isValidDomain);
++  // Compare against current backend state to determine novel vs skipped.
++  var existingDomains = {}, existingKeywords = {};
++  var existingAllowedActive = {}, existingAllowedPending = {}, hardcoded = {};
++  (state.domains || []).forEach(function(d) { existingDomains[d] = true; });
++  (state.keywords || []).forEach(function(k) { existingKeywords[k] = true; });
++  (state.userAllowedDomains || []).forEach(function(e) { if (e && e.domain) existingAllowedActive[e.domain] = true; });
++  (state.allowlistPending || []).forEach(function(e) { if (e && e.domain) existingAllowedPending[e.domain] = true; });
++  (window.godsEyeHardcodedDomains || []).forEach(function(d) { hardcoded[d] = true; });
++  var novelDomains = [], skippedDomains = 0;
++  inDomains.forEach(function(d) { if (existingDomains[d]) skippedDomains++; else novelDomains.push(d); });
++  var novelKeywords = [], skippedKeywords = 0;
++  inKeywords.forEach(function(k) { if (existingKeywords[k]) skippedKeywords++; else novelKeywords.push(k); });
++  var novelAllowlist = [], skippedAllowlist = 0;
++  inAllowlist.forEach(function(d) {
++    if (hardcoded[d] || existingAllowedActive[d] || existingAllowedPending[d]) skippedAllowlist++;
++    else novelAllowlist.push(d);
++  });
++  return {
++    novelDomains: novelDomains,
++    novelKeywords: novelKeywords,
++    novelAllowlist: novelAllowlist,
++    skippedDomains: skippedDomains,
++    skippedKeywords: skippedKeywords,
++    skippedAllowlist: skippedAllowlist,
++    rejected: rejected
++  };
++}
++function showImportPreview(p) {
++  var el = document.getElementById('import-preview');
++  var sum = document.getElementById('import-preview-summary');
++  if (!el || !sum) return;
++  var totalAdd = p.novelDomains.length + p.novelKeywords.length + p.novelAllowlist.length;
++  var totalSkip = p.skippedDomains + p.skippedKeywords + p.skippedAllowlist;
++  if (totalAdd === 0 && p.rejected === 0) {
++    sum.textContent = 'Nothing to import. All ' + totalSkip + ' entries are already present.';
++    el.style.display = 'block';
++    return;
++  }
++  var lines = [];
++  lines.push('<strong>Will add:</strong>');
++  lines.push('&nbsp;&nbsp;' + p.novelDomains.length + ' blocked domain(s)');
++  lines.push('&nbsp;&nbsp;' + p.novelKeywords.length + ' blocked keyword(s)');
++  lines.push('&nbsp;&nbsp;' + p.novelAllowlist.length + ' allowed domain(s) (each entering a 72-hour review)');
++  if (totalSkip > 0) {
++    lines.push('<strong>Skipped (already present):</strong> ' + totalSkip);
++  }
++  if (p.rejected > 0) {
++    lines.push('<strong style="color:#c0392b">Rejected (invalid):</strong> ' + p.rejected);
++  }
++  sum.innerHTML = lines.join('<br>');
++  el.style.display = 'block';
++  showImportFeedback('', false);
++}
++async function applyImport() {
++  var p = _pendingImport;
++  if (!p) return;
++  var addedDomains = 0, addedKeywords = 0, addedAllowlist = 0;
++  try {
++    for (var i = 0; i < p.novelDomains.length; i++) {
++      var d = p.novelDomains[i];
++      var ok = await cr.sendWithPromise('addDomain', d);
++      if (ok) {
++        if (state.domains.indexOf(d) === -1) state.domains.push(d);
++        addedDomains++;
++      }
++    }
++    for (var j = 0; j < p.novelKeywords.length; j++) {
++      var k = p.novelKeywords[j];
++      var ok2 = await cr.sendWithPromise('addKeyword', k);
++      if (ok2) {
++        if (state.keywords.indexOf(k) === -1) state.keywords.push(k);
++        addedKeywords++;
++      }
++    }
++    for (var m = 0; m < p.novelAllowlist.length; m++) {
++      var ad = p.novelAllowlist[m];
++      var ok3 = await cr.sendWithPromise('addAllowlistDomain', ad);
++      if (ok3) {
++        state.allowlistPending.push({domain: ad, requested_at: state.nowUtc});
++        addedAllowlist++;
++      }
++    }
++    renderTags('domains-list', state.domains, removeDomain);
++    renderTags('keywords-list', state.keywords, removeKeyword);
++    renderAllowlistPending();
++    var msg = 'Imported: ' + addedDomains + ' blocked domain(s), '
++      + addedKeywords + ' blocked keyword(s), '
++      + addedAllowlist + ' allowed domain(s) pending review.';
++    if (p.rejected > 0) msg += ' Rejected ' + p.rejected + ' invalid entries.';
++    showImportFeedback(msg, false);
++  } catch (e) {
++    dbgLog('IMPORT_APPLY_FAIL', String(e && e.stack || e && e.message || e));
++    showImportFeedback('Import partially applied. See debug log.', true);
++  } finally {
++    _pendingImport = null;
++    var prev = document.getElementById('import-preview');
++    if (prev) prev.style.display = 'none';
++    var f = document.getElementById('import-file');
++    if (f) f.value = '';
 +  }
 +}
 +function refreshAllowlistCountdowns() {
