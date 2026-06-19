@@ -12,6 +12,8 @@
     </a>
 </div>
 
+> **Browser-Projects fork** — This is an independent fork of [Helium by imputnet](https://github.com/imputnet/helium), maintained by [Browser-Projects](https://github.com/Browser-Projects). Includes additional features: God's Eye distraction blocker with cross-profile enforcement, incognito/guest support, user allowlist with 72-hour review, re-enabled built-in password manager, SPA-aware content enforcement, and Backup & Restore for block lists.
+
 ## Downloads
 > [!NOTE]
 > Helium is currently in beta, so unexpected issues may occur.
@@ -22,18 +24,18 @@ It'll pick a compatible binary for your platform automatically.
 
 The same releases can also be downloaded from source on GitHub:
 
-- [Latest macOS release](https://github.com/imputnet/helium-macos/releases/latest)
-- [Latest Linux release](https://github.com/imputnet/helium-linux/releases/latest)
-- [Latest Windows release](https://github.com/imputnet/helium-windows/releases/latest)
+- [Latest macOS release](https://github.com/Browser-Projects/helium-macos/releases/latest)
+- [Latest Linux release](https://github.com/Browser-Projects/helium-linux/releases/latest)
+- [Latest Windows release](https://github.com/Browser-Projects/helium-windows/releases/latest)
 
 ## Helium repos
 All Helium packaging, tooling, services, and components are open source
 and published on GitHub.
 
 ### Platform packaging and tooling
-- [Helium for macOS](https://github.com/imputnet/helium-macos)
-- [Helium for Linux](https://github.com/imputnet/helium-linux)
-- [Helium for Windows](https://github.com/imputnet/helium-windows)
+- [Helium for macOS](https://github.com/Browser-Projects/helium-macos)
+- [Helium for Linux](https://github.com/Browser-Projects/helium-linux)
+- [Helium for Windows](https://github.com/Browser-Projects/helium-windows)
 
 ### Web services and Helium components
 - [Helium services](https://github.com/imputnet/helium-services)
@@ -47,7 +49,7 @@ development environment for community contributions.
 Linux packaging includes a similar development script, so the same guide
 can be applied there too.
 
-[> See development docs in macOS repo](https://github.com/imputnet/helium-macos/blob/main/docs/building.md#development-build-and-environment)
+[> See development docs in macOS repo](https://github.com/Browser-Projects/helium-macos/blob/main/docs/building.md#development-build-and-environment)
 
 ## Contributing
 Before contributing to Helium, please read the guidelines in
