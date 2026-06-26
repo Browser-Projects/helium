@@ -146,7 +146,7 @@
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_ALLOWLIST_H_
 --- a/chrome/browser/gods_eye/gods_eye_allowlist.cc
 +++ b/chrome/browser/gods_eye/gods_eye_allowlist.cc
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,165 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -246,8 +246,26 @@
 +      continue;
 +    }
 +    std::string kw = base::ToLowerASCII(entry.GetString());
-+    if (!kw.empty() && url_lower.find(kw) != std::string::npos) {
-+      return entry.GetString();
++    if (kw.empty()) {
++      continue;
++    }
++    // Word-boundary search: keyword must be surrounded by non-alphanumeric
++    // characters (or start/end of string). Prevents 'lust' from matching
++    // inside 'cluster', 'illustrate', 'lust_content', etc.
++    // Separators: anything that is not [a-zA-Z0-9], including spaces,
++    // hyphens, underscores, slashes, dots, and all URL delimiter chars.
++    size_t pos = 0;
++    while ((pos = url_lower.find(kw, pos)) != std::string::npos) {
++      const bool left_ok =
++          (pos == 0 ||
++           !base::IsAsciiAlphaNumeric(url_lower[pos - 1]));
++      const bool right_ok =
++          (pos + kw.size() >= url_lower.size() ||
++           !base::IsAsciiAlphaNumeric(url_lower[pos + kw.size()]));
++      if (left_ok && right_ok) {
++        return entry.GetString();
++      }
++      ++pos;
 +    }
 +  }
 +  return std::string();
@@ -377,7 +395,7 @@
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_DOM_OBSERVER_H_
 --- a/chrome/browser/gods_eye/gods_eye_dom_observer.cc
 +++ b/chrome/browser/gods_eye/gods_eye_dom_observer.cc
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,280 @@
 +// Copyright 2025 The Helium Authors
 +// You can use, redistribute, and/or modify this source code under
 +// the terms of the GPL-3.0 license that can be found in the LICENSE file.
@@ -579,7 +597,10 @@
 +      "    var og = (ogEl && ogEl.content) || '';"
 +      "    var hay = (body + ' ' + title + ' ' + og).toLowerCase();"
 +      "    for (var i = 0; i < keywords.length; i++) {"
-+      "      if (hay.indexOf(keywords[i]) !== -1) return keywords[i];"
++      "      try {"
++      "        var re = new RegExp('(?<![a-zA-Z0-9])' + keywords[i] + '(?![a-zA-Z0-9])');"
++      "        if (re.test(hay)) return keywords[i];"
++      "      } catch(re_err) {}"
 +      "    }"
 +      "    return '';"
 +      "  } catch (e) { return ''; }"
