@@ -134,14 +134,14 @@
 +std::string GodsEyeMatchBlockedUrlKeyword(PrefService* local_state,
 +                                          const GURL& url);
 +
-+// Walks kGodsEyeAllowlistPending and promotes any entries whose 72-hour review
++// Walks kGodsEyeAllowlistPending and promotes any entries whose 36-hour review
 +// window has elapsed into kGodsEyeUserAllowedDomains. Safe to call from any
 +// UI-thread context (PrefService is UI-thread-affine). Cheap if pending list
 +// is empty.
 +void GodsEyePromoteExpiredPendingAllowlist(PrefService* local_state);
 +
-+// 72 hours in seconds. Exposed for unit tests / WebUI countdown reuse.
-+inline constexpr double kGodsEyeAllowlistReviewSeconds = 72.0 * 60.0 * 60.0;
++// 36 hours in seconds. Exposed for unit tests / WebUI countdown reuse.
++inline constexpr double kGodsEyeAllowlistReviewSeconds = 36.0 * 60.0 * 60.0;
 +
 +#endif  // CHROME_BROWSER_GODS_EYE_GODS_EYE_ALLOWLIST_H_
 --- a/chrome/browser/gods_eye/gods_eye_allowlist.cc
@@ -895,7 +895,7 @@
 +
 +GodsEyeNavigationThrottle::ThrottleCheckResult
 +GodsEyeNavigationThrottle::CheckNavigation() {
-+  // Promote any user-allowlist entries whose 72h review window has elapsed,
++  // Promote any user-allowlist entries whose 36h review window has elapsed,
 +  // so that allow rules take effect even if the user never opens the Gods
 +  // Eye settings page after the deadline.
 +  GodsEyePromoteExpiredPendingAllowlist(GetLocalState());

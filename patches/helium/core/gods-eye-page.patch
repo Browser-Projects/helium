@@ -270,7 +270,7 @@
 +      Domains in this list bypass <strong>all</strong> Gods Eye blocking
 +      (domain, keyword, and DOM keyword). The hardcoded list cannot be
 +      modified. Newly added user domains take effect only after a
-+      <strong>72-hour</strong> review window.
++      <strong>36-hour</strong> review window.
 +    </div>
 +    <div style="font-size:12px; color:var(--text-muted); margin-top:6px;">
 +      Hardcoded (always allowed)
@@ -281,7 +281,7 @@
 +    </div>
 +    <div class="tag-list" id="user-allowed-list"></div>
 +    <div style="font-size:12px; color:var(--text-muted); margin-top:10px;">
-+      Pending review (72h)
++      Pending review (36h)
 +    </div>
 +    <div class="tag-list" id="allowlist-pending-list"></div>
 +    <div class="row">
@@ -297,7 +297,7 @@
 +      or import from a previously exported backup.
 +      <strong>Lock duration is never exported or imported.</strong>
 +      Imports only append &mdash; existing entries are never replaced or removed.
-+      Imported allowed domains go through the standard 72-hour review window.
++      Imported allowed domains go through the standard 36-hour review window.
 +    </div>
 +    <div class="row">
 +      <button class="btn-add" onclick="exportBackup()">Export</button>
@@ -477,7 +477,7 @@
 +    renderTags('keywords-list', state.keywords, removeKeyword);
 +    state.userAllowedDomains = data.userAllowedDomains || [];
 +    state.allowlistPending = data.allowlistPending || [];
-+    state.allowlistReviewSeconds = data.allowlistReviewSeconds || (72*3600);
++    state.allowlistReviewSeconds = data.allowlistReviewSeconds || (36*3600);
 +    renderHardcodedDomains();
 +    renderUserAllowedDomains();
 +    renderAllowlistPending();
@@ -605,7 +605,7 @@
 +  el.innerHTML = '';
 +  var list = state.allowlistPending || [];
 +  if (!list.length) { el.innerHTML = '<span class="empty-hint">None pending</span>'; return; }
-+  var reviewSecs = state.allowlistReviewSeconds || (72*3600);
++  var reviewSecs = state.allowlistReviewSeconds || (36*3600);
 +  list.forEach(function(entry) {
 +    var tag = document.createElement('span');
 +    tag.className = 'tag';
@@ -677,7 +677,7 @@
 +// against tampering during an active lock. Therefore:
 +//   * Lock duration (expiryTimestamp) and active state are NEVER exported.
 +//   * Imports only APPEND novel entries; never remove or replace.
-+//   * Imported allowed-domain entries always enter the 72h pending queue
++//   * Imported allowed-domain entries always enter the 36h pending queue
 +//     with requested_at = now -- per-entry timestamps from JSON are ignored.
 +//   * Strict validation (size cap, length cap, type cap) on imports.
 +function showImportFeedback(msg, isError) {
@@ -843,7 +843,7 @@
 +  lines.push('<strong>Will add:</strong>');
 +  lines.push('&nbsp;&nbsp;' + p.novelDomains.length + ' blocked domain(s)');
 +  lines.push('&nbsp;&nbsp;' + p.novelKeywords.length + ' blocked keyword(s)');
-+  lines.push('&nbsp;&nbsp;' + p.novelAllowlist.length + ' allowed domain(s) (each entering a 72-hour review)');
++  lines.push('&nbsp;&nbsp;' + p.novelAllowlist.length + ' allowed domain(s) (each entering a 36-hour review)');
 +  if (totalSkip > 0) {
 +    lines.push('<strong>Skipped (already present):</strong> ' + totalSkip);
 +  }
@@ -1161,7 +1161,7 @@
 +    return;
 +  }
 +
-+  // Promote any pending allowlist entries whose 72h review window has elapsed.
++  // Promote any pending allowlist entries whose 36h review window has elapsed.
 +  GodsEyePromoteExpiredPendingAllowlist(prefs);
 +
 +  const base::ListValue& domains =
